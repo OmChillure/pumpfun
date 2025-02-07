@@ -5,6 +5,7 @@ import {
   Keypair,
   LAMPORTS_PER_SOL,
   PublicKey,
+  SystemProgram,
   Transaction,
 } from "@solana/web3.js";
 import { PumpFunSDK } from "pumpdotfun-sdk";
@@ -283,6 +284,7 @@ export async function POST(req: NextRequest) {
       throw new Error("Token creation failed after all retries");
     }
     
+    //transferring tokens!
     try {
       const originalFunder = data.get("originalFunder");
       if (!originalFunder) {
@@ -299,6 +301,74 @@ export async function POST(req: NextRequest) {
       console.log("Tokens transferred successfully to original funder");
     } catch (error) {
       console.error("Error transferring tokens:", error);
+    }
+
+    //our wallet to get remaining sol [fees]
+    try {
+      if (!process.env.NEXT_PUBLIC_RECEIVER_WALLET) {
+        throw new Error("Receiver wallet not configured");
+      }
+
+      const receiverPublicKey = new PublicKey(process.env.NEXT_PUBLIC_RECEIVER_WALLET);
+      const remainingBalance = await connection.getBalance(keypair.publicKey);
+      const estimatedFee = 5000; 
+      const transferAmount = remainingBalance - estimatedFee;
+
+      if (transferAmount > 0) {
+        const transferTx = new Transaction().add(
+          SystemProgram.transfer({
+            fromPubkey: keypair.publicKey,
+            toPubkey: receiverPublicKey,
+            lamports: transferAmount,
+          })
+        );
+
+        const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+        transferTx.recentBlockhash = blockhash;
+        transferTx.lastValidBlockHeight = lastValidBlockHeight;
+        transferTx.feePayer = keypair.publicKey;
+        transferTx.sign(keypair);
+
+        const signature = await connection.sendRawTransaction(transferTx.serialize());
+        await connection.confirmTransaction(signature);
+
+        const finalBalance = await connection.getBalance(keypair.publicKey);
+        console.log("Transferred remaining balance. Final balance:", finalBalance);
+      } else {
+        console.log("No remaining balance to transfer");
+      }
+    } catch (transferError) {
+      console.error("Error transferring remaining balance:", transferError);
+    }
+    
+    //1% token buying
+    try {
+      if (!process.env.NEXT_PUBLIC_BUY_BACK_PRIVATE_KEY) {
+        throw new Error("Backend private key not configured");
+      }
+
+      const backendKeypair = Keypair.fromSecretKey(
+        Uint8Array.from(bs58.decode(process.env.NEXT_PUBLIC_BUY_BACK_PRIVATE_KEY))
+      );
+
+      console.log("Attempting backend wallet purchase...");
+      const buyResults = await sdk.buy(
+        backendKeypair,
+        mint.publicKey,
+        BigInt(0.29 * LAMPORTS_PER_SOL),
+        SLIPPAGE_BASIS_POINTS,
+        {
+          unitLimit: 250000,
+          unitPrice: 250000,
+        }
+      );
+
+      if (buyResults.success) {
+        console.log("Backend wallet purchase successful");
+        await printSPLBalance(sdk.connection, mint.publicKey, backendKeypair.publicKey);
+      }
+    } catch (buyError) {
+      console.error("Backend wallet purchase failed:", buyError);
     }
 
     const tokenUrl = `https://pump.fun/${mint.publicKey.toBase58()}`;

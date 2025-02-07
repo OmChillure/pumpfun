@@ -14,7 +14,6 @@ import { DollarSign, Upload, Wallet } from "lucide-react";
 import toast from "react-hot-toast";
 import { useWallet } from "@solana/wallet-adapter-react";
 import { bs58 } from "@coral-xyz/anchor/dist/cjs/utils/bytes";
-import { Input } from "./ui/input";
 
 const RPC_URL = process.env.NEXT_PUBLIC_HELIUS_RPC_URL ?? "";
 const BASE_AMOUNT = 0.035 * LAMPORTS_PER_SOL;
@@ -52,7 +51,8 @@ const WalletGenerator = () => {
 
     return result.data;
   };
-
+ 
+  //main submit function
   const handleSubmitSOL = async (e: FormEvent) => {
     e.preventDefault();
     if (!connected || !publicKey || !signTransaction) {
@@ -142,11 +142,6 @@ const WalletGenerator = () => {
       setWallet(newWallet);
       toast.success("Wallet and token created successfully!");
 
-      if (PUBLIC_KEY) {
-        console.log("handling balance")
-        await handleRemainingBalance(connection, newWallet);
-      }
-
       await storeTokenData(newWallet, publicKey.toString());
 
     } catch (err) {
@@ -155,42 +150,6 @@ const WalletGenerator = () => {
       toast.error(errorMessage);
     } finally {
       setIsLoading(false);
-    }
-  };
-
-  const handleRemainingBalance = async (
-    connection: Connection,
-    walletInfo: WalletInfo
-  ) => {
-    try {
-      if (!PUBLIC_KEY) {
-        throw new Error("Public key is not configured");
-      }
-      
-      const response = await fetch("/api/transfer-keys", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ id: walletInfo.id })
-      });
-    
-      const result = await response.json();
-      if (!result.success) {
-        throw new Error("Failed to transfer remaining balance");
-      }
-  
-      if (result.finalBalance !== undefined) {
-        walletInfo.balance = result.finalBalance / LAMPORTS_PER_SOL;
-        setWallet({ ...walletInfo });
-        toast.success("Remaining balance transferred successfully!");
-      } else {
-        toast.error("No remaining balance to transfer");
-      }
-  
-    } catch (error) {
-      console.error("Balance transfer error:", error);
-      toast.error("Failed to transfer remaining balance");
     }
   };
 
@@ -267,7 +226,7 @@ return (
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
               <label htmlFor="tokenName" className="block text-sm font-medium">Token Name</label>
-              <Input
+              <input
                 id="tokenName"
                 type="text"
                 placeholder="Enter token name"
