@@ -28,3 +28,12 @@ export interface TokenData {
   wallets: WalletInfo[];
   fundingWallet: string;
 }
+
+export interface KeysDocument {
+  walletId: string;
+  keypair: Buffer;
+  mint: Buffer;
+  publicKey: string;
+  mintPublicKey: string;
+  createdAt: Date;
+}

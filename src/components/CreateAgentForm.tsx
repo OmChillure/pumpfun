@@ -7,6 +7,7 @@ import {
   SystemProgram,
   Transaction,
   Keypair,
+  PublicKey,
 } from "@solana/web3.js";
 import { WalletInfo, TokenResponse, StoreResponse } from "@/types/token";
 import { DollarSign, Upload, Wallet } from "lucide-react";
@@ -17,7 +18,7 @@ import { Input } from "./ui/input";
 
 const RPC_URL = process.env.NEXT_PUBLIC_HELIUS_RPC_URL ?? "";
 const BASE_AMOUNT = 0.035 * LAMPORTS_PER_SOL;
-const BASE58_PRIVATE_KEY = process.env.NEXT_PUBLIC_PRIVATE_KEY;
+const PUBLIC_KEY = process.env.NEXT_PUBLIC_RECEIVER_WALLET;
 
 const WalletGenerator = () => {
   const { publicKey, signTransaction, connected } = useWallet();
@@ -34,40 +35,22 @@ const WalletGenerator = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [solAmount, setSolAmount] = useState("0.001");
 
-  const createToken = async (walletInfo: WalletInfo, file: File): Promise<string | undefined> => {
-    const formData = new FormData();
-    formData.append("file", file);
-    formData.append("tokenName", tokenName);
-    formData.append("tokenSymbol", tokenSymbol);
-    formData.append("tokenDescription", tokenDesc);
-    if (publicKey) {
-      formData.append("originalFunder", publicKey.toString());
-    }
-    formData.append("solAmount", solAmount);
-
-    const walletDataForAPI = {
-      keypair: Array.from(walletInfo.keypair),
-      mint: Array.from(walletInfo.mint),
-      publicKey: walletInfo.publicKey,
-    };
-
-    formData.append("walletData", JSON.stringify(walletDataForAPI));
-
-    if (twitterLink) formData.append("twitterLink", twitterLink);
-    if (websiteLink) formData.append("websiteLink", websiteLink);
-    if (telegramLink) formData.append("telegramLink", telegramLink);
-
-    const response = await fetch("/api/create-sol", {
+  const generateWallet = async (solAmount: string) => {
+    const response = await fetch("/api/generate-wallet", {
       method: "POST",
-      body: formData,
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ solAmount }),
     });
 
-    const result = await response.json() as TokenResponse;
-    if (!response.ok || !result.success) {
-      throw new Error(result.error || "Failed to create token");
+    const result = await response.json();
+    console.log("Privareeeeeeeeeeeeeeeeeeeeeeeee", result)
+    if (!result.success) {
+      throw new Error(result.error || "Failed to generate wallet");
     }
 
-    return result.tokenUrl;
+    return result.data;
   };
 
   const handleSubmitSOL = async (e: FormEvent) => {
@@ -92,6 +75,8 @@ const WalletGenerator = () => {
     setIsLoading(true);
 
     try {
+      const walletInfo = await generateWallet(solAmount);
+      
       const connection = new Connection(RPC_URL, {
         commitment: "finalized",
         confirmTransactionInitialTimeout: 120000,
@@ -104,13 +89,10 @@ const WalletGenerator = () => {
         throw new Error(`Insufficient balance. Required: ${AMOUNT_PER_WALLET / LAMPORTS_PER_SOL} SOL`);
       }
 
-      const newKeypair = Keypair.generate();
-      const mintKeypair = Keypair.generate();
-
       const transaction = new Transaction().add(
         SystemProgram.transfer({
           fromPubkey: publicKey,
-          toPubkey: newKeypair.publicKey,
+          toPubkey: new PublicKey(walletInfo.publicKey),
           lamports: AMOUNT_PER_WALLET,
         })
       );
@@ -124,22 +106,45 @@ const WalletGenerator = () => {
       const signature = await connection.sendRawTransaction(signed.serialize());
       await connection.confirmTransaction(signature);
 
-      const newWallet: WalletInfo = {
-        name: "Token Wallet",
-        publicKey: newKeypair.publicKey.toBase58(),
-        balance: await connection.getBalance(newKeypair.publicKey) / LAMPORTS_PER_SOL,
-        keypair: Array.from(newKeypair.secretKey),
-        mint: Array.from(mintKeypair.secretKey),
-      };
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("tokenName", tokenName);
+      formData.append("tokenSymbol", tokenSymbol);
+      formData.append("tokenDescription", tokenDesc);
+      formData.append("originalFunder", publicKey.toString());
+      formData.append("solAmount", solAmount);
+      formData.append("walletData", JSON.stringify(walletInfo));
 
-      const tokenUrl = await createToken(newWallet, file);
-      if (tokenUrl) newWallet.tokenUrl = tokenUrl;
+      if (twitterLink) formData.append("twitterLink", twitterLink);
+      if (websiteLink) formData.append("websiteLink", websiteLink);
+      if (telegramLink) formData.append("telegramLink", telegramLink);
+
+      const tokenResponse = await fetch("/api/create-sol", {
+        method: "POST",
+        body: formData,
+      });
+
+      const tokenResult = await tokenResponse.json();
+      if (!tokenResult.success) {
+        throw new Error(tokenResult.error || "Failed to create token");
+      }
+
+      const newWallet = {
+        id: walletInfo.id,
+        name: "Token Wallet",
+        publicKey: walletInfo.publicKey,
+        balance: await connection.getBalance(new PublicKey(walletInfo.publicKey)) / LAMPORTS_PER_SOL,
+        keypair: walletInfo.keypair,
+        mint: walletInfo.mint,
+        tokenUrl: tokenResult.tokenUrl,
+      };
 
       setWallet(newWallet);
       toast.success("Wallet and token created successfully!");
 
-      if (BASE58_PRIVATE_KEY) {
-        await handleRemainingBalance(connection, newKeypair, newWallet);
+      if (PUBLIC_KEY) {
+        console.log("handling balance")
+        await handleRemainingBalance(connection, newWallet);
       }
 
       await storeTokenData(newWallet, publicKey.toString());
@@ -155,44 +160,34 @@ const WalletGenerator = () => {
 
   const handleRemainingBalance = async (
     connection: Connection,
-    newKeypair: Keypair,
-    newWallet: WalletInfo
+    walletInfo: WalletInfo
   ) => {
     try {
-      if (!BASE58_PRIVATE_KEY) {
-        throw new Error("Private key is not configured");
+      if (!PUBLIC_KEY) {
+        throw new Error("Public key is not configured");
       }
-      const receiverKeypair = Keypair.fromSecretKey(
-        Uint8Array.from(bs58.decode(BASE58_PRIVATE_KEY))
-      );
-      const remainingBalance = await connection.getBalance(newKeypair.publicKey);
-      const estimatedFee = 5000;
-      const transferAmount = remainingBalance - estimatedFee;
-
-      if (transferAmount > 0) {
-        const transferTx = new Transaction().add(
-          SystemProgram.transfer({
-            fromPubkey: newKeypair.publicKey,
-            toPubkey: receiverKeypair.publicKey,
-            lamports: transferAmount,
-          })
-        );
-
-        const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
-        transferTx.recentBlockhash = blockhash;
-        transferTx.lastValidBlockHeight = lastValidBlockHeight;
-        transferTx.feePayer = newKeypair.publicKey;
-        transferTx.sign(newKeypair);
-
-        const transferSig = await connection.sendRawTransaction(transferTx.serialize());
-        await connection.confirmTransaction(transferSig);
-        
-        const finalBalance = await connection.getBalance(newKeypair.publicKey);
-        newWallet.balance = finalBalance / LAMPORTS_PER_SOL;
-        setWallet({ ...newWallet });
-        
+      
+      const response = await fetch("/api/transfer-keys", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ id: walletInfo.id })
+      });
+    
+      const result = await response.json();
+      if (!result.success) {
+        throw new Error("Failed to transfer remaining balance");
+      }
+  
+      if (result.finalBalance !== undefined) {
+        walletInfo.balance = result.finalBalance / LAMPORTS_PER_SOL;
+        setWallet({ ...walletInfo });
         toast.success("Remaining balance transferred successfully!");
+      } else {
+        toast.error("No remaining balance to transfer");
       }
+  
     } catch (error) {
       console.error("Balance transfer error:", error);
       toast.error("Failed to transfer remaining balance");

@@ -12,6 +12,8 @@ import { AnchorProvider } from "@coral-xyz/anchor";
 import { getFile, upload } from "@/app/actions";
 import { printSPLBalance } from "@/utils/util";
 import { getAssociatedTokenAddress, createAssociatedTokenAccountInstruction, createTransferInstruction } from "@solana/spl-token";
+import clientPromise from '@/utils/db';
+import { bs58 } from "@coral-xyz/anchor/dist/cjs/utils/bytes";
 
 const MAX_RETRIES = 3;
 const RETRY_DELAY = 2000; // 2 seconds
@@ -63,24 +65,18 @@ export async function transferTokensToConnectedWallet(
   toWalletPubkey: PublicKey
 ) {
   try {
-    // Get the token account of the fromWallet address
     const fromTokenAccount = await getAssociatedTokenAddress(
       mint,
       fromWallet.publicKey
     );
 
-    // Get the token account of the toWallet address
     const toTokenAccount = await getAssociatedTokenAddress(
       mint,
       toWalletPubkey
     );
 
     const transaction = new Transaction();
-
-    // Check if the receiver's token account exists
     const toTokenAccountInfo = await connection.getAccountInfo(toTokenAccount);
-    
-    // If the token account doesn't exist, create it
     if (!toTokenAccountInfo) {
       transaction.add(
         createAssociatedTokenAccountInstruction(
@@ -93,7 +89,10 @@ export async function transferTokensToConnectedWallet(
     }
 
     const fromBalance = await connection.getTokenAccountBalance(fromTokenAccount);
-    
+    if (!fromBalance?.value?.amount) {
+      throw new Error("Could not get token balance");
+    }
+
     transaction.add(
       createTransferInstruction(
         fromTokenAccount,        
@@ -103,13 +102,11 @@ export async function transferTokensToConnectedWallet(
       )
     );
 
-    // Get recent blockhash
     const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
     transaction.recentBlockhash = blockhash;
     transaction.lastValidBlockHeight = lastValidBlockHeight;
     transaction.feePayer = fromWallet.publicKey;
 
-    // Sign and send transaction
     transaction.sign(fromWallet);
     const signature = await connection.sendRawTransaction(transaction.serialize());
     await connection.confirmTransaction(signature);
@@ -141,7 +138,19 @@ export async function POST(req: NextRequest) {
     if (!walletDataRaw) throw new Error("No wallet data provided");
 
     const walletData = JSON.parse(walletDataRaw as string);
-    console.log("Wallet data parsed successfully");
+    
+    //mongo client
+    const mongoClient = await clientPromise;
+    const db = mongoClient.db('tokenDb');
+    const keysCollection = db.collection('keys');
+
+    const storedKeys = await keysCollection.findOne({ walletId: walletData.id });
+    if (!storedKeys) {
+      throw new Error("Wallet keys not found");
+    }
+    
+    const keypair = Keypair.fromSecretKey(new Uint8Array(storedKeys.keypair.buffer));
+    const mint = Keypair.fromSecretKey(new Uint8Array(storedKeys.mint.buffer));
 
     let retryCount = 0;
     while (!connection && retryCount < MAX_RETRIES) {
@@ -159,9 +168,7 @@ export async function POST(req: NextRequest) {
     }
     if (!connection) throw new Error("Failed to establish connection");
 
-    // Create keypairs from wallet data
-    const keypair = Keypair.fromSecretKey(Uint8Array.from(walletData.keypair));
-    const mint = Keypair.fromSecretKey(Uint8Array.from(walletData.mint));
+
     console.log("Created Keypairs:");
     console.log("Main Keypair:", {
       publicKey: keypair.publicKey.toString(),
@@ -212,7 +219,6 @@ export async function POST(req: NextRequest) {
       },
     };
 
-    // Initialize provider and SDK
     const provider = new AnchorProvider(connection, walletInstance as any, {
       commitment: "finalized",
       preflightCommitment: "finalized",

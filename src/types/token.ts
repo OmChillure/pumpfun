@@ -1,6 +1,7 @@
 import { ObjectId } from "mongodb";
 
 export interface WalletInfo {
+  id: any;
   name: string;
   publicKey: string;
   balance: number;
