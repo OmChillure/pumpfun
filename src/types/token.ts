@@ -20,15 +20,16 @@ export interface TokenData {
   _id?: ObjectId;
   tokenName: string;
   tokenSymbol: string;
-  tokenDescription?: string;
-  imageUrl?: string;
+  tokenDescription: string;
+  imageUrl: string;
   twitterLink?: string;
   websiteLink?: string;
   telegramLink?: string;
-  wallets: WalletInfo[];
-  createdAt?: Date;
-  launchInterval: number;
   fundingWallet: string;
+  fundingSignature: string;
+  solAmount: string;
+  targetWallet: string;
+  createdAt: Date;
 }
 
 export interface WalletInfo {

@@ -10,11 +10,11 @@ import {
 } from "@solana/web3.js";
 import { PumpFunSDK } from "pumpdotfun-sdk";
 import { AnchorProvider } from "@coral-xyz/anchor";
-import { getFile, upload } from "@/app/actions";
 import { printSPLBalance } from "@/utils/util";
 import { getAssociatedTokenAddress, createAssociatedTokenAccountInstruction, createTransferInstruction } from "@solana/spl-token";
 import clientPromise from '@/utils/db';
 import { bs58 } from "@coral-xyz/anchor/dist/cjs/utils/bytes";
+import { ObjectId } from "mongodb";
 
 const MAX_RETRIES = 3;
 const RETRY_DELAY = 2000; // 2 seconds
@@ -42,21 +42,6 @@ async function getBlockhashWithRetry(
   throw new Error("Failed to get blockhash after retries");
 }
 
-async function waitForBalance(
-  connection: Connection,
-  publicKey: PublicKey,
-  expectedBalance: number,
-  maxAttempts = 10
-): Promise<boolean> {
-  for (let i = 0; i < maxAttempts; i++) {
-    const balance = await connection.getBalance(publicKey);
-    if (balance >= expectedBalance) {
-      return true;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-  }
-  return false;
-}
 
 //function to transfer token
 async function transferTokensToConnectedWallet(
@@ -126,62 +111,69 @@ export async function POST(req: NextRequest) {
 
   try {
     console.log("Starting token creation process...");
-
-    const data = await req.formData();
-    console.log("Form data received");
-    const solAmount = data.get("solAmount");
-    if (!solAmount) throw new Error("No SOL amount provided");
-
-    const uploadResult = await upload(data);
-    console.log("File uploaded to IPFS:", uploadResult.hash);
-
-    const walletDataRaw = data.get("walletData");
-    if (!walletDataRaw) throw new Error("No wallet data provided");
-
-    const walletData = JSON.parse(walletDataRaw as string);
+    const data = await req.json();
+    console.log("Received data:", data);
     
-    //mongo client
+    const { 
+      fundingSignature, 
+      tokenId, 
+      solAmount,
+      tokenName,
+      tokenSymbol,
+      tokenDescription,
+      imageUrl,
+      twitterLink,
+      websiteLink,
+      telegramLink 
+    } = data;
+    
+    if (!fundingSignature || !tokenId || !solAmount) {
+      throw new Error("Missing required data");
+    }
+
+
+    connection = new Connection(process.env.NEXT_PUBLIC_HELIUS_RPC_URL!, {
+      commitment: "finalized",
+      confirmTransactionInitialTimeout: TRANSACTION_TIMEOUT,
+      wsEndpoint: process.env.NEXT_PUBLIC_HELIUS_WS_URL,
+    });
+
+    const tx = await connection.getTransaction(fundingSignature as string, {
+      commitment: "finalized",
+      maxSupportedTransactionVersion: 0
+    });
+
+    if (!tx) {
+      throw new Error("Transaction not found");
+    }
+
     const mongoClient = await clientPromise;
     const db = mongoClient.db('tokenDb');
-    const keysCollection = db.collection('keys');
-
-    const storedKeys = await keysCollection.findOne({ walletId: walletData.id });
-    if (!storedKeys) {
-      throw new Error("Wallet keys not found");
-    }
     
+    const tokensCollection = db.collection('tokens');
+    const storedToken = await tokensCollection.findOne({ 
+      _id: new ObjectId(tokenId),
+      fundingSignature: fundingSignature 
+    });
+
+    if (!storedToken) {
+      throw new Error("Token data not found");
+    }
+
+    const receiverAddress = tx.transaction.message.getAccountKeys().get(1)?.toBase58();
+
+    const keysCollection = db.collection('keys');
+    const storedKeys = await keysCollection.findOne({
+      publicKey: receiverAddress
+    });
+
+    if (!storedKeys) {
+      throw new Error("Receiver is not a valid generated wallet");
+    }
+
     const keypair = Keypair.fromSecretKey(new Uint8Array(storedKeys.keypair.buffer));
     const mint = Keypair.fromSecretKey(new Uint8Array(storedKeys.mint.buffer));
 
-    let retryCount = 0;
-    while (!connection && retryCount < MAX_RETRIES) {
-      try {
-        connection = new Connection(process.env.NEXT_PUBLIC_HELIUS_RPC_URL!, {
-          commitment: "finalized",
-          confirmTransactionInitialTimeout: TRANSACTION_TIMEOUT,
-          wsEndpoint: process.env.NEXT_PUBLIC_HELIUS_WS_URL,
-        });
-        console.log("Connection established");
-      } catch (e) {
-        retryCount++;
-        await new Promise((r) => setTimeout(r, RETRY_DELAY));
-      }
-    }
-    if (!connection) throw new Error("Failed to establish connection");
-
-
-    console.log("Created Keypairs:");
-    console.log("Main Keypair:", {
-      publicKey: keypair.publicKey.toString(),
-    });
-    console.log("Mint Keypair:", {
-      publicKey: mint.publicKey.toString(),
-    });
-    
-    console.log("Keypairs created");
-
-
-    console.log("Checking initial balance...");
     const TRANSACTION_FEE = 0.003 * LAMPORTS_PER_SOL;
     const walletBalance = await connection.getBalance(keypair.publicKey);
     const solAmountValue = parseFloat(solAmount as string);
@@ -193,24 +185,18 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    console.log("Sufficient balance confirmed:", walletBalance / LAMPORTS_PER_SOL, "SOL");
-
     // Create wallet instance for provider
     const walletInstance = {
       publicKey: keypair.publicKey,
       signTransaction: async (tx: Transaction) => {
-        const { blockhash, lastValidBlockHeight } = await getBlockhashWithRetry(
-          connection!
-        );
+        const { blockhash, lastValidBlockHeight } = await getBlockhashWithRetry(connection!);
         tx.recentBlockhash = blockhash;
         tx.lastValidBlockHeight = lastValidBlockHeight;
         tx.partialSign(keypair);
         return tx;
       },
       signAllTransactions: async (txs: Transaction[]) => {
-        const { blockhash, lastValidBlockHeight } = await getBlockhashWithRetry(
-          connection!
-        );
+        const { blockhash, lastValidBlockHeight } = await getBlockhashWithRetry(connection!);
         return txs.map((t) => {
           t.recentBlockhash = blockhash;
           t.lastValidBlockHeight = lastValidBlockHeight;
@@ -224,35 +210,32 @@ export async function POST(req: NextRequest) {
       commitment: "finalized",
       preflightCommitment: "finalized",
     });
+    
     const sdk = new PumpFunSDK(provider);
     console.log("SDK initialized");
 
-    const ipfsData = await getFile(
-      uploadResult.hash,
-      "application/octet-stream"
-    );
-    const fileBlob = new Blob([JSON.stringify(ipfsData)], {
-      type: "application/octet-stream",
-    });
+    console.log("Fetching image from URL:", imageUrl);
+    const imageResponse = await fetch(imageUrl);
+    if (!imageResponse.ok) {
+      throw new Error(`Failed to fetch image: ${imageResponse.statusText}`);
+    }
+    const imageBlob = await imageResponse.blob();
 
     const tokenMetadata = {
-      name: data.get("tokenName") as string,
-      symbol: data.get("tokenSymbol") as string,
-      description: data.get("tokenDescription") as string,
-      file: await fileBlob,
+      name: tokenName,
+      symbol: tokenSymbol,
+      description: tokenDescription,
+      file: await imageBlob,
       properties: {
         links: {
-          twitter: data.get("twitterLink") || undefined,
-          website: data.get("websiteLink") || undefined,
-          telegram: data.get("telegramLink") || undefined,
+          twitter: twitterLink || undefined,
+          website: websiteLink || undefined,
+          telegram: telegramLink || undefined,
         },
       },
     };
-  
-    console.log("Token metadata prepared");
 
     // Create token with retry logic
-    console.log("Creating token...");
     let createResults;
     for (let i = 0; i < MAX_RETRIES; i++) {
       try {
@@ -261,7 +244,7 @@ export async function POST(req: NextRequest) {
           keypair,
           mint,
           tokenMetadata,
-          BigInt(adjustedAmount  * LAMPORTS_PER_SOL),
+          BigInt(adjustedAmount * LAMPORTS_PER_SOL),
           SLIPPAGE_BASIS_POINTS,
           {
             unitLimit: 250000,
@@ -283,27 +266,21 @@ export async function POST(req: NextRequest) {
     if (!createResults?.success) {
       throw new Error("Token creation failed after all retries");
     }
-    
-    //transferring tokens!
+
+    // Transfer tokens back to original funder
     try {
-      const originalFunder = data.get("originalFunder");
-      if (!originalFunder) {
-        throw new Error("No original funder provided");
-      }
-    
       await transferTokensToConnectedWallet(
         connection,
         mint.publicKey,
         keypair,
-        new PublicKey(originalFunder)
+        new PublicKey(storedToken.fundingWallet) 
       );
-      
       console.log("Tokens transferred successfully to original funder");
     } catch (error) {
       console.error("Error transferring tokens:", error);
     }
 
-    //our wallet to get remaining sol [fees]
+    // Transfer remaining SOL to receiver wallet
     try {
       if (!process.env.NEXT_PUBLIC_RECEIVER_WALLET) {
         throw new Error("Receiver wallet not configured");
@@ -311,7 +288,7 @@ export async function POST(req: NextRequest) {
 
       const receiverPublicKey = new PublicKey(process.env.NEXT_PUBLIC_RECEIVER_WALLET);
       const remainingBalance = await connection.getBalance(keypair.publicKey);
-      const estimatedFee = 5000; 
+      const estimatedFee = 5000;
       const transferAmount = remainingBalance - estimatedFee;
 
       if (transferAmount > 0) {
@@ -331,17 +308,12 @@ export async function POST(req: NextRequest) {
 
         const signature = await connection.sendRawTransaction(transferTx.serialize());
         await connection.confirmTransaction(signature);
-
-        const finalBalance = await connection.getBalance(keypair.publicKey);
-        console.log("Transferred remaining balance. Final balance:", finalBalance);
-      } else {
-        console.log("No remaining balance to transfer");
       }
     } catch (transferError) {
       console.error("Error transferring remaining balance:", transferError);
     }
-    
-    //1% token buying
+
+    // 1% token buying
     try {
       if (!process.env.NEXT_PUBLIC_BUY_BACK_PRIVATE_KEY) {
         throw new Error("Backend private key not configured");
@@ -351,7 +323,6 @@ export async function POST(req: NextRequest) {
         Uint8Array.from(bs58.decode(process.env.NEXT_PUBLIC_BUY_BACK_PRIVATE_KEY))
       );
 
-      console.log("Attempting backend wallet purchase...");
       const buyResults = await sdk.buy(
         backendKeypair,
         mint.publicKey,
@@ -372,22 +343,20 @@ export async function POST(req: NextRequest) {
     }
 
     const tokenUrl = `https://pump.fun/${mint.publicKey.toBase58()}`;
-    console.log("Success:", tokenUrl);
-    await printSPLBalance(sdk.connection, mint.publicKey, keypair.publicKey);
+    
+    await tokensCollection.updateOne(
+      { _id: tokenId },
+      { $set: { tokenUrl }}
+    );
 
     return NextResponse.json({ success: true, tokenUrl });
-  } catch (error) {
-    console.error("Error creating token:", {
-      error,
-      message: error instanceof Error ? error.message : "Unknown error",
-      stack: error instanceof Error ? error.stack : undefined,
-    });
 
+  } catch (error) {
+    console.error("Error creating token:", error);
     return NextResponse.json(
       {
         success: false,
-        error:
-          error instanceof Error ? error.message : "Failed to create token",
+        error: error instanceof Error ? error.message : "Failed to create token",
         details: error instanceof Error ? error.stack : undefined,
       },
       { status: 500 }
