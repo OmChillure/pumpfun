@@ -176,19 +176,6 @@ const TokenList = () => {
                     </a>
                   )}
                 </div>
-                <div className="w-full">
-                  <div className="relative overflow-hidden rounded-md h-[7vh]">
-                    <div className="absolute inset-0 bg-gradient-to-r from-gray-800 via-gray-900 to-black opacity-90"></div>
-                    <div className="relative z-10 p-2 text-center">
-                      <p className="text-white text-sm font-semibold">
-                        This token is boosted {token.wallets.length}x
-                      </p>
-                      <p className="text-white text-xs">
-                        Every {token.launchInterval} seconds !!!
-                      </p>
-                    </div>
-                  </div>
-                </div>
               </div>
             </div>
           ))}
